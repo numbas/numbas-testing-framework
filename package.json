@@ -1,0 +1,17 @@
+{
+  "name": "headless-numbas",
+  "version": "1.0.0",
+  "description": "",
+  "main": "headless",
+  "dependencies": {
+    "browser-env": "^3.3.0",
+    "luxon": "^1.25.0",
+    "xslt-processor": "^0.11.5"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC"
+}

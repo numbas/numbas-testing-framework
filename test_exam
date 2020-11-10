@@ -1,0 +1,257 @@
+#!/usr/bin/env node
+
+const EXAM_DIR = process.argv[2];
+
+require('browser-env')();
+global.module = undefined;
+window.alert = function() {}
+
+const luxon = require('luxon');
+global.DateTime = luxon.DateTime;
+const {SCORM_API} = require(`${process.cwd()}/numbas_lti/static/api.js`);
+
+const fs = require('fs');
+const path = require('path');
+const {Console} = require('console');
+const stream = require('stream');
+
+var captured_log = '';
+const real_console = new Console(process.stdout,process.stderr);
+const s = new stream.Writable({write: function(chunk,enc,next) {
+    captured_log += chunk;
+    next();
+}});
+const fake_console = new Console(s,process.stderr);
+Object.keys(console).forEach(function(n) {
+    if(typeof console[n] == 'function' && typeof fake_console[n] == 'function') {
+        console[n] = fake_console[n];
+    }
+});
+
+require(EXAM_DIR+'/scripts.js');
+
+class PartCreditError extends Error {
+}
+PartCreditError.prototype.originalMessages = ['headless.not full credit'];
+
+function tick(correct) {
+    return correct ? '✔' : '✖';
+}
+
+function die(e) {
+    process.stdout.write(JSON.stringify({success:false, message: e.message, originalMessages: e.originalMessages || []}));
+    end();
+}
+function fail(message) {
+    process.stdout.write(JSON.stringify({success:false, message: message}));
+    end();
+}
+function succeed() {
+    process.stdout.write(JSON.stringify({success:true}));
+    end();
+}
+function end(code) {
+    if(captured_log) {
+        process.stderr.write(`------------\nConsole log:\n${captured_log}\n----------`);
+    }
+    process.exit(code);
+}
+
+function parse_numbasobject(data) {
+    var re_header = /^\/\/ Numbas version: [^\n]*\n/;
+    if(!data.match(re_header)) {
+        throw(new Error("Not a valid .exam file"));
+    }
+    data = data.replace(re_header,'');
+    return JSON.parse(data);
+}
+
+function test_question(q) {
+    var promise = q.signals.on('ready').then(function() {
+        q.parts.forEach(p=>{
+            test_part(p);
+        });
+    }).catch(e=>{
+        if(q.scope) {
+            console.log("Question variables:");
+            for(let name of Object.keys(q.scope.variables)) {
+                const value = Numbas.jme.display.treeToJME({tok:q.scope.getVariable(name)});
+                console.log(`  ${name}: ${value}`);
+            }
+        }
+        die(e);
+    });
+    return promise;
+}
+
+function scope_for_part(p) {
+    return p.settings.variableReplacementStrategy=='alwaysreplace' ? p.errorCarriedForwardScope() : p.getScope();
+}
+
+function answer_for_part(p) {
+    if(p.type=='gapfill') {
+        return p.gaps.map(answer_for_part);
+    }
+    var answer = p.getCorrectAnswer(scope_for_part(p));
+    return answer;
+}
+
+function test_part(p) {
+    if(p.type=='information') {
+        return;
+    }
+    if(p.type=='gapfill' && p.gaps.length==0) {
+        return;
+    }
+    var answer = answer_for_part(p);
+    p.storeAnswer(answer);
+    p.setStudentAnswer();
+    const scope = scope_for_part(p);
+    p.submit();
+    if(Numbas.math.precround(p.credit,5)!=1) {
+        const niceName = Numbas.util.capitalise(Numbas.util.nicePartName(p.path));
+        real_console.error(`✖ ${niceName}: ${p.type}`);
+        real_console.error(`Answer: ${JSON.stringify(answer)}`);
+        real_console.error(`Credit: ${p.credit}`);
+        if(p.settings.variableReplacementStrategy=='alwaysreplace') {
+            real_console.error('Variables:');
+            for(let name of Object.keys(scope.variables)) {
+                const value = Numbas.jme.display.treeToJME({tok:scope.getVariable(name)});
+                real_console.error(`  ${name}: ${value}`);
+            }
+        }
+        p.markingFeedback.filter(m=>m.message).forEach(m=>real_console.error(`* ${m.message}`));
+        throw(new PartCreditError(`${niceName} got ${p.credit} credit`));
+    }
+}
+
+function scorm_api(scorm_cmi) {
+    const basic_cmi = {
+        'cmi.suspend_data': '',
+        'cmi.objectives._count': 0,
+        'cmi.interactions._count': 0,
+        'cmi.learner_name': '',
+        'cmi.learner_id': '',
+        'cmi.location': '',
+        'cmi.score.raw': 0,
+        'cmi.score.scaled': 0,
+        'cmi.score.min': 0,
+        'cmi.score.max': 0,
+        'cmi.total_time': 0,
+        'cmi.success_status': '',
+        'cmi.completion_status': 'not attempted',
+        'cmi.mode': 'normal',
+        'cmi.entry': 'ab-initio',
+        'numbas.user_role': 'student',
+    };
+    const cmi = Object.assign({},basic_cmi,scorm_cmi);
+    const fixed_cmi = {};
+    for(var x in cmi) {
+        fixed_cmi[x] = {value: cmi[x], time: 0};
+    }
+    const api = new SCORM_API({
+        standalone: true,
+        scorm_cmi: fixed_cmi
+    });
+    return api;
+}
+
+function load_exam(exam_data, scorm_api) {
+    window.top.opener = {API_1484_11: scorm_api};
+    window.pipwerks.SCORM.API.handle = null;
+    window.pipwerks.SCORM.API.isFound = null;
+    window.pipwerks.SCORM.connection.isActive = false;
+    var seed = Math.seedrandom(new Date().getTime());
+    var job = Numbas.schedule.add;
+    var store = Numbas.store = new Numbas.storage.scorm.SCORMStorage();
+    var exam = Numbas.exam = Numbas.createExamFromJSON(exam_data,store,true);
+    exam.seed = Numbas.util.hashCode(seed);
+    var entry = store.getEntry();
+    if(store.getMode() == 'review') {
+        entry = 'review';
+    }
+    exam.entry = entry;
+
+    switch(entry) {
+        case 'ab-initio':
+            job(exam.init,exam);
+            exam.signals.on('ready', function() {
+                Numbas.signals.trigger('exam ready');
+            })
+            break;
+        case 'resume':
+        case 'review':
+            job(exam.load,exam);
+            exam.signals.on('ready', function() {
+                Numbas.signals.trigger('exam ready');
+                job(function() {
+                    if(entry == 'review') {
+                        job(exam.end,exam,false);
+                    }
+                });
+            });
+            break;
+    }
+    job(function() {
+        Numbas.signals.trigger('Numbas initialised');
+    });
+    const p = new Promise(function(resolve,reject) {
+        exam.signals.on('ready',function() {
+            resolve(exam);
+        }).catch(die);
+    });
+    return p;
+}
+
+function test_ab_initio(exam_data) {
+    const api = scorm_api({});
+    load_exam(exam_data, api).then(exam => {
+        var promises = [];
+        exam.questionList.forEach(q => {
+            var promise = test_question(q);
+            promises.push(promise);
+        });
+        Promise.all(promises).then(function() {
+            test_review(exam_data,api.data);
+        }).catch(die);
+    }).catch(die);
+}
+
+function test_review(exam_data,scorm_data) {
+    const data = Object.assign({},scorm_data,{'cmi.mode': 'review', 'cmi.entry': 'review'});
+    const api = scorm_api(data);
+    load_exam(exam_data,api).then(exam => {
+        const saved_score = scorm_data['cmi.score.raw'];
+        if(exam.score != saved_score) {
+            fail(`The resumed exam's score was ${exam.score} instead of ${saved_score}`);
+        }
+        succeed();
+    });
+}
+
+function run() {
+    try {
+        Numbas.queueScript('headless-test',['start-exam'],function() {
+            try {
+                for(var x in Numbas.extensions) {
+                    Numbas.activateExtension(x);
+                }
+                Numbas.display = null;
+                fs.readFile(EXAM_DIR+'/source.exam','utf8',(err,data) => {
+                    try {
+                        const jd = parse_numbasobject(data);
+                        test_ab_initio(jd);
+                    } catch(e) {
+                        die(e);
+                    }
+                });
+            } catch(e) {
+                die(e);
+            }
+        });
+    } catch(e) {
+        die(e);
+    }
+}
+
+run();
