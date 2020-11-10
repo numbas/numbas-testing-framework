@@ -1,14 +1,12 @@
 #!/usr/bin/env node
 
-const EXAM_DIR = process.argv[2];
-
 require('browser-env')();
 global.module = undefined;
 window.alert = function() {}
 
 const luxon = require('luxon');
 global.DateTime = luxon.DateTime;
-const {SCORM_API} = require(`${process.cwd()}/numbas_lti/static/api.js`);
+const SCORM_API = require(`./api.js`);
 
 const fs = require('fs');
 const path = require('path');
@@ -28,8 +26,6 @@ Object.keys(console).forEach(function(n) {
     }
 });
 
-require(EXAM_DIR+'/scripts.js');
-
 class PartCreditError extends Error {
 }
 PartCreditError.prototype.originalMessages = ['headless.not full credit'];
@@ -39,15 +35,16 @@ function tick(correct) {
 }
 
 function die(e) {
-    process.stdout.write(JSON.stringify({success:false, message: e.message, originalMessages: e.originalMessages || []}));
+    process.stdout.write(JSON.stringify({success:false, message: e.message+'\n'+e.stack, originalMessages: e.originalMessages || []}));
     end();
 }
 function fail(message) {
     process.stdout.write(JSON.stringify({success:false, message: message}));
     end();
 }
-function succeed() {
-    process.stdout.write(JSON.stringify({success:true}));
+function succeed(data) {
+    const obj = Object.assign({success:true}, data || {});
+    process.stdout.write(JSON.stringify(obj));
     end();
 }
 function end(code) {
@@ -147,7 +144,11 @@ function scorm_api(scorm_cmi) {
     const cmi = Object.assign({},basic_cmi,scorm_cmi);
     const fixed_cmi = {};
     for(var x in cmi) {
-        fixed_cmi[x] = {value: cmi[x], time: 0};
+        if(typeof cmi[x]!='object') {
+            fixed_cmi[x] = {value: cmi[x], time: 0};
+        } else {
+            fixed_cmi[x] = cmi[x];
+        }
     }
     const api = new SCORM_API({
         standalone: true,
@@ -229,7 +230,9 @@ function test_review(exam_data,scorm_data) {
     });
 }
 
-function run() {
+function run(exam_dir,fn) {
+    require(exam_dir+'/scripts.js');
+
     try {
         Numbas.queueScript('headless-test',['start-exam'],function() {
             try {
@@ -237,10 +240,10 @@ function run() {
                     Numbas.activateExtension(x);
                 }
                 Numbas.display = null;
-                fs.readFile(EXAM_DIR+'/source.exam','utf8',(err,data) => {
+                fs.readFile(exam_dir+'/source.exam','utf8',(err,data) => {
+                    const parsed_data = parse_numbasobject(data);
                     try {
-                        const jd = parse_numbasobject(data);
-                        test_ab_initio(jd);
+                        fn(parsed_data);
                     } catch(e) {
                         die(e);
                     }
@@ -254,4 +257,85 @@ function run() {
     }
 }
 
-run();
+function remark_sessions(exam_data,sessions) {
+    const results = [];
+
+    function remark_session(resolve_all,i) {
+        const session_data = sessions[i];
+        const promise = new Promise((resolve,reject) => {
+            const api = scorm_api(session_data.cmi);
+            api.allow_set = true;
+            load_exam(exam_data, api).then(exam => {
+                exam.questionList.forEach(function(q) {
+                    q.store.saveQuestion(q);
+                    q.allParts().forEach(function(p) {
+                        p.store.partAnswered(p);
+                    });
+                });
+                exam.store.saveExam(exam);
+
+                const changed_keys = {};
+                for(var x in api.data) {
+                    if(!(x.match(/\._count$/)) && (session_data.cmi[x]===undefined || api.data[x]!=session_data.cmi[x].value)) {
+                        changed_keys[x] = api.data[x];
+                    }
+                }
+                resolve({success: true, changed_keys: changed_keys});
+            }).catch(err=>{
+                resolve({success: false, error: err});
+            })
+        });
+        promise.then(result => {
+            result.attempt_pk = session_data.attempt_pk;
+            results.push(result);
+            if(i+1<sessions.length) {
+                remark_session(resolve_all,i+1);
+            } else {
+                resolve_all(results);
+            }
+        }).catch(die);
+    }
+    
+    return new Promise((resolve,reject) => {
+        if(sessions.length){ 
+            remark_session(resolve,0);
+        }
+    });
+}
+
+const commands = {
+    test: function(data) {
+        test_ab_initio(data);
+    },
+
+    remark: function(data) {
+        let stdin = '';
+        process.stdin.setEncoding('utf-8');
+        process.stdin.on('readable', function() {
+            var chunk;
+            while (chunk = process.stdin.read()) {
+                stdin += chunk;
+            }
+        });
+        process.stdin.on('end', function() {
+            try {
+                const sessions = JSON.parse(stdin);
+                remark_sessions(data,sessions).then(results => {
+                    succeed({results: results});
+                });
+            } catch(e) {
+                die(e);
+            }
+        });
+    }
+}
+
+const exam_dir = process.argv[2];
+const command = process.argv[3] || 'test';
+
+if(!commands[command]) {
+    const command_names = Object.keys(commands).join(', ');
+    die(fail(`The command ${command} is not valid. Valid commands are: ${command_names}`));
+}
+
+run(exam_dir, commands[command]);
