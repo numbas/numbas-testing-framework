@@ -320,6 +320,9 @@ const commands = {
         process.stdin.on('end', function() {
             try {
                 const sessions = JSON.parse(stdin);
+                if(!sessions.length) {
+                    succeed({results: []});
+                }
                 remark_sessions(data,sessions).then(results => {
                     succeed({results: results});
                 });
