@@ -199,7 +199,7 @@ function load_exam(exam_data, scorm_api) {
     const p = new Promise(function(resolve,reject) {
         exam.signals.on('ready',function() {
             resolve(exam);
-        }).catch(die);
+        }).catch(reject);
     });
     return p;
 }
