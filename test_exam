@@ -260,6 +260,15 @@ function run(exam_dir,fn,options) {
 function remark_sessions(exam_data,sessions,options) {
     const results = [];
 
+    const reevaluate_variables = {};
+    if(options.reevaluate_variables) {
+        options.reevaluate_variables.forEach(d=>{
+            const [n,name] = d.split(':');
+            reevaluate_variables[n] = reevaluate_variables[n] || [];
+            reevaluate_variables[n].push(name);
+        });
+    }
+
     function remark_session(resolve_all,i) {
         const session_data = sessions[i];
         const promise = new Promise((resolve,reject) => {
@@ -267,7 +276,16 @@ function remark_sessions(exam_data,sessions,options) {
             api.allow_set = true;
             load_exam(exam_data, api).then(exam => {
                 exam.questionList.forEach(function(q) {
-                    q.store.saveQuestion(q);
+                    let reevaluated = false;
+                    if(reevaluate_variables[q.number]) {
+                        reevaluated = true;
+                        const todo = {};
+                        reevaluate_variables[q.number].forEach(name => {
+                            q.scope.deleteVariable(name);
+                            todo[name] = q.variablesTodo[name];
+                        });
+                        Numbas.jme.variables.makeVariables(todo,q.scope);
+                    }
                     q.allParts().forEach(function(p) {
                         p.store.partAnswered(p);
                         p.revealed = false;
@@ -275,12 +293,12 @@ function remark_sessions(exam_data,sessions,options) {
                             p.stagedAnswer = p.resume_stagedAnswer || p.stagedAnswer;
                         }
                     });
-                    if(options.unsubmitted) {
+                    if(options.unsubmitted || reevaluated) {
                         q.parts.forEach(function(p) {
-                            p.revealed = false;
                             p.submit();
                         });
                     }
+                    q.store.saveQuestion(q);
                 });
                 exam.store.saveExam(exam);
 
@@ -348,6 +366,9 @@ let command;
 const switches = {
     'unsubmitted': false
 }
+const multi = {
+    'reevaluate_variables': true
+}
 const options = {};
 for(let i=3;i<process.argv.length;i++) {
     const arg = process.argv[i];
@@ -355,6 +376,13 @@ for(let i=3;i<process.argv.length;i++) {
         const option = arg.slice(2);
         if(option in switches) {
             options[option] = true;
+        } else if(option in multi) {
+            let j = i+1;
+            while(j<process.argv.length && !process.argv[j].match(/^--/)) {
+                j += 1;
+            }
+            options[option] = process.argv.slice(i+1,j);
+            i = j-1;
         } else {
             options[option] = process.argv[i+1];
         }
