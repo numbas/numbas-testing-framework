@@ -277,10 +277,8 @@ function remark_sessions(exam_data,sessions,options) {
                     });
                     if(options.unsubmitted) {
                         q.parts.forEach(function(p) {
-                            if(options.unsubmitted) {
-                                p.revealed = false;
-                                p.submit();
-                            }
+                            p.revealed = false;
+                            p.submit();
                         });
                     }
                 });
