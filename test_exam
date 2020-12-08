@@ -162,6 +162,14 @@ function load_exam(exam_data, scorm_api) {
     window.pipwerks.SCORM.API.handle = null;
     window.pipwerks.SCORM.API.isFound = null;
     window.pipwerks.SCORM.connection.isActive = false;
+    if(Numbas.schedule.unhalt) {
+        Numbas.schedule.unhalt();
+    } else {
+        Numbas.schedule.halted = false;
+        Numbas.schedule.signalboxes.forEach(function(sb) {
+            sb.error = null;
+        });
+    }
     var seed = Math.seedrandom(new Date().getTime());
     var job = Numbas.schedule.add;
     var store = Numbas.store = new Numbas.storage.scorm.SCORMStorage();
@@ -396,7 +404,7 @@ for(let i=3;i<process.argv.length;i++) {
 
 if(!commands[command]) {
     const command_names = Object.keys(commands).join(', ');
-    die(fail(`The command ${command} is not valid. Valid commands are: ${command_names}`));
+    fail(`The command ${command} is not valid. Valid commands are: ${command_names}`);
 }
 
 run(exam_dir, commands[command], options);
