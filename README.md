@@ -1,3 +1,5 @@
+*This is an abandoned path of development. The Numbas LTI tool now runs exams client-side when re-marking.*
+
 # Numbas testing framework
 This is a command-line script which runs [Numbas](https://www.numbas.org.uk/) exams for testing or remarking.
 
